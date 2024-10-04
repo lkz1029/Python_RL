@@ -1,5 +1,7 @@
 import gym
 
+#깃허브 확인용 문구
+
 # Create the LunarLander environment
 env = gym.make("LunarLander-v2", render_mode="human")
 

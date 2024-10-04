@@ -5,6 +5,8 @@ from tensorflow.keras import models, layers
 from collections import deque
 import random
 
+#깃허브 확인용 문구
+
 # 환경 설정
 env = gym.make("CartPole-v1")
 state_size = env.observation_space.shape[0]
