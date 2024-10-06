@@ -11,22 +11,22 @@ import os
 from gym.wrappers import RecordVideo
 
 # 하이퍼파라미터 설정
-LEARNING_RATE = 0.001  # 학습률
+LEARNING_RATE = 0.0001  # 학습률
 GAMMA = 0.99  # 할인 인자
 ENV_NAME = 'CartPole-v1'  # 사용할 환경 이름
 EPSILON = 0.1  # Epsilon-greedy 정책에서의 탐색 확률
-MAX_STEPS = 1000  # 주어진 시간 (최대 스텝 수)
-MEMORY_SIZE = 10000  # Replay buffer 크기
-BATCH_SIZE = 64  # 미니 배치 크기
-TARGET_UPDATE = 100  # 타깃 네트워크 업데이트 주기
+MAX_STEPS = 100000  # 주어진 시간 (최대 스텝 수)
+MEMORY_SIZE = 50000  # Replay buffer 크기
+BATCH_SIZE = 128  # 미니 배치 크기
+TARGET_UPDATE = 50  # 타깃 네트워크 업데이트 주기
 
 # Q 함수 신경망 정의
 class DQN(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_size, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fcq = nn.Linear(256, output_size)
+        self.fc1 = nn.Linear(input_size, 512)
+        self.fc2 = nn.Linear(512, 512)
+        self.fcq = nn.Linear(512, output_size)
 
     def forward(self, state):
         x = torch.relu(self.fc1(state))
@@ -127,7 +127,7 @@ class DQNAgent:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
             # Epsilon 감소
-            self.epsilon = max(0.01, self.epsilon * 0.995)
+            self.epsilon = max(0.01, self.epsilon * 0.999)
 
             # 결과 출력 및 보상 기록
             print(f"Epoch: {epoch}, reward: {reward_sum}, steps: {step}, epsilon: {self.epsilon:.3f}")
@@ -151,7 +151,7 @@ def test_video(model):
     print('------------Start Test Video--------------')
     model.eval()
 
-    env = RecordVideo(gym.make(ENV_NAME, render_mode="rgb_array"), video_folder="./videos", episode_trigger=lambda x: x % 1 == 0)
+    env = RecordVideo(gym.make(ENV_NAME, render_mode="rgb_array"), video_folder="./DQN_videos", episode_trigger=lambda x: x % 1 == 0)
     done = False
     state = env.reset()[0]
     state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
