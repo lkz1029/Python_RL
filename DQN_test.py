@@ -1,136 +1,186 @@
 import gym
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras import models, layers
-from collections import deque
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import random
+import copy
+from collections import deque
+from matplotlib import pyplot as plt
+import os
+from gym.wrappers import RecordVideo
 
-#깃허브 확인용 문구
+# 하이퍼파라미터 설정
+LEARNING_RATE = 0.001  # 학습률
+GAMMA = 0.99  # 할인 인자
+ENV_NAME = 'CartPole-v1'  # 사용할 환경 이름
+EPSILON = 0.1  # Epsilon-greedy 정책에서의 탐색 확률
+MAX_STEPS = 1000  # 주어진 시간 (최대 스텝 수)
+MEMORY_SIZE = 10000  # Replay buffer 크기
+BATCH_SIZE = 64  # 미니 배치 크기
+TARGET_UPDATE = 100  # 타깃 네트워크 업데이트 주기
 
-# 환경 설정
-env = gym.make("CartPole-v1")
-state_size = env.observation_space.shape[0]
-action_size = env.action_space.n
+# Q 함수 신경망 정의
+class DQN(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(input_size, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fcq = nn.Linear(256, output_size)
 
-# Hyperparameters
-learning_rate = 0.001
-gamma = 0.95  # 할인율
-epsilon = 1.0  # 탐색 vs 활용
-epsilon_min = 0.01
-epsilon_decay = 0.995
-batch_size = 64
-train_start = 1000
-memory_size = 2000
+    def forward(self, state):
+        x = torch.relu(self.fc1(state))
+        x = torch.relu(self.fc2(x))
+        q = self.fcq(x)
+        return q
 
-# Replay Buffer
-memory = deque(maxlen=memory_size)
+# Replay Buffer 정의
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
 
-# Q-Network
-def build_model():
-    model = models.Sequential()
-    model.add(layers.Dense(24, input_dim=state_size, activation="relu"))
-    model.add(layers.Dense(24, activation="relu"))
-    model.add(layers.Dense(action_size, activation="linear"))
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss="mse")
-    return model
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
 
-model = build_model()
-target_model = build_model()
+    def sample(self, batch_size):
+        state, action, reward, next_state, done = zip(*random.sample(self.buffer, batch_size))
+        return torch.stack(state), torch.tensor(action), torch.tensor(reward), torch.stack(next_state), torch.tensor(done)
 
-# Target 모델 업데이트
-def update_target_model():
-    target_model.set_weights(model.get_weights())
+    def __len__(self):
+        return len(self.buffer)
 
-# Epsilon-greedy 정책
-def epsilon_greedy_action(state, epsilon):
-    if np.random.rand() <= epsilon:
-        return random.randrange(action_size)
-    q_values = model.predict(state)
-    return np.argmax(q_values[0])
+# DQN 에이전트 클래스
+class DQNAgent:
+    def __init__(self):
+        self.env = gym.make(ENV_NAME)
+        self.input_size = self.env.observation_space.shape[0]
+        self.output_size = self.env.action_space.n
+        self.policy_net = DQN(self.input_size, self.output_size)
+        self.target_net = copy.deepcopy(self.policy_net)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LEARNING_RATE)
+        self.memory = ReplayBuffer(MEMORY_SIZE)
+        self.epsilon = EPSILON
+        self.gamma = GAMMA
+        self.loss_fn = nn.MSELoss()
+        self.steps_done = 0
 
-# 학습 함수
-def replay():
-    if len(memory) < batch_size:
-        return
-    minibatch = random.sample(memory, batch_size)
-    
-    for state, action, reward, next_state, done in minibatch:
-        target = model.predict(state)
-        if done:
-            target[0][action] = reward
+    def select_action(self, state):
+        # Epsilon-greedy 정책
+        if random.random() < self.epsilon:
+            return self.env.action_space.sample()  # 무작위 행동
         else:
-            t = target_model.predict(next_state)
-            target[0][action] = reward + gamma * np.amax(t[0])
-        
-        model.fit(state, target, epochs=1, verbose=0)
+            with torch.no_grad():
+                return torch.argmax(self.policy_net(state)).item()  # Q 값이 최대인 행동
 
-# 학습 진행
-episodes = 500
-for e in range(episodes):
-    state, _ = env.reset()  # 첫 번째 값만 가져오기
+    def optimize_model(self):
+        if len(self.memory) < BATCH_SIZE:
+            return
 
-    # 상태의 형식과 내용을 확인하여 디버깅
-    print(f"Raw initial state: {state}, type: {type(state)}")  # 원본 상태 출력
+        states, actions, rewards, next_states, dones = self.memory.sample(BATCH_SIZE)
 
-    # 상태를 NumPy 배열로 변환
-    try:
-        state = np.array(state, dtype=np.float32)  # NumPy 배열로 변환
-        state = np.reshape(state, [1, state_size])  # [1, state_size] 형태로 변환
-        print(f"Processed initial state: {state}, type: {type(state)}, shape: {state.shape}")  # 변환 후 상태 출력
+        # 주 네트워크에서 Q 값 계산
+        state_action_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
 
-    except Exception as e:
-        print(f"Error processing initial state: {e}")  # 오류 발생 시 메시지 출력
-        continue  # 다음 에피소드로 넘어감
+        # 타깃 네트워크에서 다음 상태의 최대 Q 값 계산
+        next_state_values = self.target_net(next_states).max(1)[0].detach()
+        expected_state_action_values = rewards + (1 - dones) * self.gamma * next_state_values
 
+        # 손실 계산
+        loss = self.loss_fn(state_action_values, expected_state_action_values)
+
+        # 신경망 업데이트
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+    def train(self):
+        print('------------Start Training--------------')
+        reward_list = []  # 보상 기록 리스트
+        max_reward = 0  # 최대 보상 초기화
+
+        for epoch in range(100000):
+            done = False
+            state = self.env.reset()[0]
+            state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)  # 상태 변환
+            reward_sum = 0
+            step = 0
+
+            while not done and step < MAX_STEPS:
+                action = self.select_action(state)  # 행동 선택
+                next_state, reward, terminated, truncated, _ = self.env.step(action)
+                next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)
+                done = terminated or truncated
+
+                # Replay Buffer에 저장
+                self.memory.push(state, action, reward, next_state, done)
+
+                # 상태 업데이트
+                state = next_state
+                reward_sum += reward
+                step += 1
+
+                # 모델 최적화
+                self.optimize_model()
+
+            # 타깃 네트워크 업데이트
+            if epoch % TARGET_UPDATE == 0:
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+
+            # Epsilon 감소
+            self.epsilon = max(0.01, self.epsilon * 0.995)
+
+            # 결과 출력 및 보상 기록
+            print(f"Epoch: {epoch}, reward: {reward_sum}, steps: {step}, epsilon: {self.epsilon:.3f}")
+            reward_list.append(reward_sum)
+
+            if reward_sum >= max_reward:
+                max_reward = reward_sum
+                torch.save(self.policy_net.state_dict(), "DQN_model.pt")
+                print("Model Saved")
+
+        self.env.close()
+
+        # 학습 과정 시각화
+        plt.plot(reward_list)
+        plt.xlabel('Epoch')
+        plt.ylabel('Reward')
+        plt.savefig('DQN_training_rewards.png')
+
+# 테스트 함수
+def test_video(model):
+    print('------------Start Test Video--------------')
+    model.eval()
+
+    env = RecordVideo(gym.make(ENV_NAME, render_mode="rgb_array"), video_folder="./videos", episode_trigger=lambda x: x % 1 == 0)
     done = False
-    time = 0
+    state = env.reset()[0]
+    state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+    reward_sum = 0
+    step = 0
 
-    while not done:
-        action = epsilon_greedy_action(state, epsilon)
-
-        # env.step()의 반환값 확인
-        step_result = env.step(action)  # 반환값을 리스트에 저장
-        print(f"Step result: {step_result}")  # 반환 값 출력
-        
-        # 반환값 수에 따라 처리
-        if len(step_result) == 5:
-            next_state, reward, done, truncated, info = step_result
-        elif len(step_result) == 4:
-            next_state, reward, done, info = step_result
-            truncated = False  # 기본값 설정
-        else:
-            print(f"Unexpected return value: {step_result}")  # 예외 사항 출력
-            break  # 루프 종료
-
-        # next_state도 동일하게 처리
-        print(f"Raw next state: {next_state}, type: {type(next_state)}")  # 원본 next 상태 출력
-
-        try:
-            next_state = np.array(next_state, dtype=np.float32)  # NumPy 배열로 변환
-            next_state = np.reshape(next_state, [1, state_size])  # [1, state_size] 형태로 변환
-            print(f"Processed next state: {next_state}, type: {type(next_state)}, shape: {next_state.shape}")  # 변환 후 상태 출력
-
-        except Exception as e:
-            print(f"Error processing next state: {e}")  # 오류 발생 시 메시지 출력
-            done = True  # 다음 상태 처리에 문제가 있을 경우 에피소드 종료
-
-        # 경험을 저장
-        memory.append((state, action, reward, next_state, done))
+    while not done and step < MAX_STEPS:
+        with torch.no_grad():
+            action = torch.argmax(model(state)).item()
+        next_state, reward, terminated, truncated, _ = env.step(action)
+        next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)
+        done = terminated or truncated
+        reward_sum += reward
         state = next_state
-        time += 1
+        step += 1
 
-        # 학습
-        if len(memory) > train_start:
-            replay()
+    print(f"Total reward: {reward_sum}, steps: {step}")
+    env.close()
 
-        # Target 네트워크 업데이트
-        if done:
-            update_target_model()
-            print(f"Episode: {e + 1}/{episodes}, Score: {time}, Epsilon: {epsilon:.2f}")
+# 메인 함수
+if __name__ == "__main__":
+    agent = DQNAgent()
+    # Uncomment the next line to train the model
+    # agent.train()
 
-    # Epsilon 감소
-    if epsilon > epsilon_min:
-        epsilon *= epsilon_decay
+    test_model = DQN(agent.input_size, agent.output_size)
+    if os.path.exists("DQN_model.pt"):
+        test_model.load_state_dict(torch.load("DQN_model.pt"))
+    else:
+        print("No pre-trained model found. Training from scratch.")
 
-env.close()
-
+    test_video(test_model)
